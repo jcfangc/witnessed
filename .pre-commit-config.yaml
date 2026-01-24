@@ -1,0 +1,10 @@
+repos:
+    - repo: local
+      hooks:
+          - id: cargo-test
+            name: cargo test
+            entry: bash -lc 'cargo test'
+            language: system
+            pass_filenames: false
+            always_run: true
+            stages: [pre-commit]
