@@ -1,5 +1,5 @@
 [project]
-name = "witness"
+name = "witnessed"
 version = "0.1.0"
 description = "Proof-carrying values for enforcing invariants across decoupled functions."
 readme = "README.md"
@@ -7,6 +7,4 @@ requires-python = ">=3.11"
 dependencies = []
 
 [dependency-groups]
-dev = [
-    "pre-commit>=4.5.1",
-]
+dev = ["pre-commit>=4.5.1"]

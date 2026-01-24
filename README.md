@@ -1,4 +1,4 @@
-# witness
+# witnessed
 
 A small Rust pattern for carrying validated invariants through the type system.
 

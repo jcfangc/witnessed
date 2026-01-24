@@ -1,9 +1,13 @@
 [package]
-name = "witness"
+name = "witnessed"
 version = "0.1.0"
-edition = "2024"
-
-[dependencies]
+edition = "2021"
+description = "Type-level witness wrapper for carrying validated invariants."
+license = "MIT"
+repository = "https://github.com/jcfangc/witnessed"
+readme = "README.md"
+keywords = ["witness", "invariant", "validation", "newtype"]
+categories = ["rust-patterns"]
 
 [dev-dependencies]
-regex = "1.12.2"
+regex = "1"
