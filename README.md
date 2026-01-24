@@ -9,7 +9,7 @@ Define a witness `W` for some type `T`. Construct `Witnessed<T, W>` only via `W:
 ## Example
 
 ```rust
-use witness::{Witness, Witnessed};
+use witnessed::{Witness, Witnessed};
 
 struct IdxLt3;
 #[derive(Debug, PartialEq, Eq)]

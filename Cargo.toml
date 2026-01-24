@@ -1,7 +1,7 @@
 [package]
 name = "witnessed"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Type-level witness wrapper for carrying validated invariants."
 license = "MIT"
 repository = "https://github.com/jcfangc/witnessed"
