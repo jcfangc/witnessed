@@ -1,8 +1,10 @@
+# .github/workflows/release.yml
+
 name: release
 
 on:
     push:
-        branches: ["main"]
+        branches: ["main", "ci/release-cd"]
         paths:
             - "Cargo.toml"
 
