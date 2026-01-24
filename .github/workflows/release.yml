@@ -1,0 +1,115 @@
+# .github/workflows/release.yml
+
+name: release
+
+on:
+    push:
+        branches: ["main"]
+        paths:
+            - "Cargo.toml"
+
+    workflow_dispatch:
+        inputs:
+            mode:
+                description: "dryrun: cargo publish --dry-run, no official tag"
+                required: true
+                default: "dryrun"
+                type: choice
+                options: ["dryrun", "real"]
+            tag_dryrun:
+                description: "If true, create vX.Y.Z-dryrun.<run_id> tag in dryrun mode"
+                required: false
+                default: "false"
+                type: choice
+                options: ["false", "true"]
+
+concurrency:
+    group: crates-release-main
+    cancel-in-progress: false
+
+jobs:
+    detect:
+        runs-on: ubuntu-latest
+        outputs:
+            changed: ${{ steps.v.outputs.changed }}
+            version: ${{ steps.v.outputs.version }}
+            prev_version: ${{ steps.v.outputs.prev_version }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - id: v
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  cur="$(grep -m1 '^version\s*=' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+                  if git rev-parse -q --verify HEAD^1 >/dev/null; then
+                    prev="$(git show HEAD^1:Cargo.toml | grep -m1 '^version\s*=' | sed -E 's/.*"([^"]+)".*/\1/')"
+                  else
+                    prev=""
+                  fi
+                  echo "version=$cur" >> "$GITHUB_OUTPUT"
+                  echo "prev_version=$prev" >> "$GITHUB_OUTPUT"
+                  [[ -n "$prev" && "$cur" != "$prev" ]] && echo "changed=true" >> "$GITHUB_OUTPUT" || echo "changed=false" >> "$GITHUB_OUTPUT"
+
+    publish_and_tag:
+        needs: [detect]
+        # push main: only when version changed
+        # workflow_dispatch: always runnable
+        if: |
+            (github.event_name == 'push' && needs.detect.outputs.changed == 'true') ||
+            (github.event_name == 'workflow_dispatch')
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+                  persist-credentials: true
+
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+
+            - name: Test
+              run: cargo test
+
+            - name: Publish (real on push / dry-run on dispatch unless mode=real)
+              env:
+                  CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.mode }}" != "real" ]]; then
+                    cargo publish --dry-run
+                  else
+                    cargo publish --locked
+                  fi
+
+            - name: Create and push tag (real tag on push; optional dryrun tag on dispatch)
+              shell: bash
+              env:
+                  VER: ${{ needs.detect.outputs.version }}
+              run: |
+                  set -euo pipefail
+
+                  # Decide whether to tag, and which tag name.
+                  if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.mode }}" != "real" ]]; then
+                    [[ "${{ inputs.tag_dryrun }}" == "true" ]] || { echo "skip tag (dryrun)"; exit 0; }
+                    tag="v${VER}-dryrun.${{ github.run_id }}"
+                  else
+                    tag="v${VER}"
+                  fi
+
+                  git fetch --tags origin
+                  if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+                    echo "tag already exists: $tag"
+                    exit 1
+                  fi
+
+                  git config user.name  "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+
+                  git tag -a "$tag" -m "Release $tag"
+                  git push origin "refs/tags/$tag"
