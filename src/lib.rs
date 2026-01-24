@@ -6,25 +6,54 @@ use core::{marker::PhantomData, ops::Deref};
 /// and return a `Witnessed<T, Self>` on success.
 pub trait Witness<T>: Sized {
     type Error;
-    fn witness(input: T) -> Result<Witnessed<T, Self>, Self::Error>;
+
+    /// Validate and optionally normalize the input.
+    /// Returns the (possibly rewritten) value on success.
+    fn check(input: T) -> Result<T, Self::Error>;
+
+    /// Construct a witnessed value via the crate-controlled boundary.
+    #[inline]
+    fn witness(input: T) -> Result<Witnessed<T, Self>, Self::Error> {
+        Witnessed::<T, Self>::try_new(input)
+    }
 }
 
 /// A value of type `T` that carries an unforgeable witness `W`.
 ///
-/// `Witnessed<T, W>` can only be constructed via `W::witness` (outside this crate),
-/// preserving invariants across decoupled functions/modules.
+/// # Invariant & construction
+///
+/// `Witnessed<T, W>` can only be constructed through `W::witness` (or `Witnessed::try_new`),
+/// which is expected to validate and optionally normalize the input. By keeping the internal
+/// constructor crate-private, downstream crates cannot forge a `Witnessed` and must pass through
+/// the witness boundary.
+///
+/// # Auto-traits (Send/Sync/Unpin) are driven by `T`
+///
+/// The marker field uses `PhantomData<fn() -> W>` intentionally. This encodes the witness at the
+/// type level without *owning* a `W`, so auto-traits are not accidentally constrained by `W`.
+///
+/// Concretely, `Witnessed<T, W>` will be `Send`/`Sync` when `T` is `Send`/`Sync`, even if `W`
+/// itself is not (e.g. it contains `Rc` or is otherwise `!Send`/`!Sync`). If you used
+/// `PhantomData<W>` instead, `W`'s auto-traits would propagate to `Witnessed<T, W>` and
+/// unnecessarily restrict it.
+///
+/// # Important note
+///
+/// This wrapper avoids exposing `&mut T`, but if `T` has interior mutability (e.g. `Cell`,
+/// `RefCell`, `Mutex`), the invariant is only as strong as `T`'s own semantics.
 #[repr(transparent)]
 pub struct Witnessed<T, W: Witness<T>> {
     inner: T,
-    _marker: PhantomData<W>,
+    _marker: PhantomData<fn() -> W>,
 }
 
 mod impls {
     use super::*;
 
     impl<T, W: Witness<T>> Witnessed<T, W> {
+        #[inline]
         pub fn try_new(inner: T) -> Result<Self, W::Error> {
-            W::witness(inner)
+            W::check(inner).map(Self::new_unchecked)
         }
     }
 
@@ -42,10 +71,8 @@ mod impls {
 
         impl Witness<i32> for Pos {
             type Error = PosErr;
-            fn witness(input: i32) -> Result<Witnessed<i32, Self>, Self::Error> {
-                (input > 0)
-                    .then(|| Witnessed::new_unchecked(input))
-                    .ok_or(PosErr::NonPos)
+            fn check(input: i32) -> Result<i32, Self::Error> {
+                (input > 0).then_some(input).ok_or(PosErr::NonPos)
             }
         }
 
@@ -72,11 +99,9 @@ mod impls {
 
         impl Witness<String> for TrimNonEmpty {
             type Error = StrErr;
-            fn witness(input: String) -> Result<Witnessed<String, Self>, Self::Error> {
-                let s = input.trim().to_owned(); // normalize
-                (!s.is_empty())
-                    .then(|| Witnessed::new_unchecked(s))
-                    .ok_or(StrErr::Empty)
+            fn check(input: String) -> Result<String, Self::Error> {
+                let s = input.trim().to_owned();
+                (!s.is_empty()).then_some(s).ok_or(StrErr::Empty)
             }
         }
 
@@ -102,11 +127,10 @@ mod impls {
 
         impl Witness<u8> for CountOnce {
             type Error = CountErr;
-            fn witness(input: u8) -> Result<Witnessed<u8, Self>, Self::Error> {
+
+            fn check(input: u8) -> Result<u8, Self::Error> {
                 CALLS.fetch_add(1, Ordering::Relaxed);
-                (input == 1)
-                    .then(|| Witnessed::new_unchecked(input))
-                    .ok_or(CountErr::Nope)
+                (input == 1).then_some(input).ok_or(CountErr::Nope)
             }
         }
 
@@ -137,9 +161,7 @@ mod impls {
         impl Witness<(String, u32, Vec<u8>)> for AbcW {
             type Error = AbcErr;
 
-            fn witness(
-                input: (String, u32, Vec<u8>),
-            ) -> Result<Witnessed<(String, u32, Vec<u8>), Self>, Self::Error> {
+            fn check(input: (String, u32, Vec<u8>)) -> Result<(String, u32, Vec<u8>), Self::Error> {
                 let (a, b, c) = input;
 
                 let a = a.trim().to_owned();
@@ -153,7 +175,7 @@ mod impls {
                     return Err(AbcErr::CNonAscii);
                 }
 
-                Ok(Witnessed::new_unchecked((a, b, c)))
+                Ok((a, b, c))
             }
         }
 
@@ -260,51 +282,63 @@ mod impl_fors {
     mod witness_debug_tests {
         use super::*;
 
-        #[test]
-        fn debug_fmt_matches_tuple_shape_by_regex() {
-            use regex::Regex;
-
-            // A minimal witness that always succeeds.
-            struct Any;
-            impl Witness<i32> for Any {
-                type Error = core::convert::Infallible;
-                fn witness(input: i32) -> Result<Witnessed<i32, Self>, Self::Error> {
-                    Ok(Witnessed::new_unchecked(input))
-                }
+        struct Any;
+        impl Witness<i32> for Any {
+            type Error = core::convert::Infallible;
+            fn check(input: i32) -> Result<i32, Self::Error> {
+                Ok(input)
             }
+        }
 
-            let w = Witnessed::<i32, Any>::try_new(7).unwrap();
-            let s = format!("{:?}", w);
-
-            // debug_tuple("Witnessed").field(&inner) => "Witnessed(<inner_debug>)"
-            assert!(
-                Regex::new(r"^Witnessed\(\d+\)$").unwrap().is_match(&s),
-                "got: {s}"
-            );
+        struct AnyStr;
+        impl Witness<&'static str> for AnyStr {
+            type Error = core::convert::Infallible;
+            fn check(input: &'static str) -> Result<&'static str, Self::Error> {
+                Ok(input)
+            }
         }
 
         #[test]
-        fn debug_fmt_preserves_inner_debug_repr() {
-            use regex::Regex;
+        fn debug_fmt_matches_tuple_shape_without_regex() {
+            let w = Witnessed::<i32, Any>::try_new(7).unwrap();
+            let s = format!("{:?}", w);
 
-            struct AnyStr;
-            impl Witness<&'static str> for AnyStr {
-                type Error = core::convert::Infallible;
-                fn witness(
-                    input: &'static str,
-                ) -> Result<Witnessed<&'static str, Self>, Self::Error> {
-                    Ok(Witnessed::new_unchecked(input))
-                }
-            }
+            // Check the prefix and suffix directly, then verify the middle is numeric.
+            assert!(s.starts_with("Witnessed("));
+            assert!(s.ends_with(')'));
 
+            // Extract the content between the parentheses.
+            let inner = &s["Witnessed(".len()..s.len() - 1];
+            assert!(
+                inner.chars().all(|c| c.is_ascii_digit()),
+                "Inner part should be digits, got: {}",
+                inner
+            );
+            assert_eq!(inner, "7");
+        }
+
+        #[test]
+        fn debug_fmt_preserves_inner_debug_repr_exactly() {
             let w = Witnessed::<&'static str, AnyStr>::try_new("hi").unwrap();
             let s = format!("{:?}", w);
 
-            // &str Debug includes quotes: "hi"
-            assert!(
-                Regex::new(r#"^Witnessed\("hi"\)$"#).unwrap().is_match(&s),
-                "got: {s}"
-            );
+            assert_eq!(s, "Witnessed(\"hi\")");
+        }
+
+        #[test]
+        fn debug_fmt_complex_structure() {
+            // Verify slightly more complex types to ensure nested Debug formatting works as expected.
+            struct AnyVec;
+            impl Witness<Vec<i32>> for AnyVec {
+                type Error = core::convert::Infallible;
+
+                fn check(input: Vec<i32>) -> Result<Vec<i32>, Self::Error> {
+                    Ok(input)
+                }
+            }
+
+            let w = Witnessed::<Vec<i32>, AnyVec>::try_new(vec![1, 2]).unwrap();
+            assert_eq!(format!("{:?}", w), "Witnessed([1, 2])");
         }
     }
 
@@ -324,8 +358,9 @@ mod impl_fors {
         struct Any;
         impl Witness<i32> for Any {
             type Error = core::convert::Infallible;
-            fn witness(input: i32) -> Result<Witnessed<i32, Self>, Self::Error> {
-                Ok(Witnessed::new_unchecked(input))
+
+            fn check(input: i32) -> Result<i32, Self::Error> {
+                Ok(input)
             }
         }
 
@@ -378,8 +413,9 @@ mod impl_fors {
         struct AnyI32;
         impl Witness<i32> for AnyI32 {
             type Error = core::convert::Infallible;
-            fn witness(input: i32) -> Result<Witnessed<i32, Self>, Self::Error> {
-                Ok(Witnessed::new_unchecked(input))
+
+            fn check(input: i32) -> Result<i32, Self::Error> {
+                Ok(input)
             }
         }
 
@@ -410,8 +446,9 @@ mod impl_fors {
         struct AnyF32;
         impl Witness<f32> for AnyF32 {
             type Error = core::convert::Infallible;
-            fn witness(input: f32) -> Result<Witnessed<f32, Self>, Self::Error> {
-                Ok(Witnessed::new_unchecked(input))
+
+            fn check(input: f32) -> Result<f32, Self::Error> {
+                Ok(input)
             }
         }
 
@@ -442,8 +479,9 @@ mod impl_fors {
         struct Any;
         impl Witness<i32> for Any {
             type Error = core::convert::Infallible;
-            fn witness(input: i32) -> Result<Witnessed<i32, Self>, Self::Error> {
-                Ok(Witnessed::new_unchecked(input))
+
+            fn check(input: i32) -> Result<i32, Self::Error> {
+                Ok(input)
             }
         }
 
@@ -488,9 +526,10 @@ mod demo {
 
     impl Witness<usize> for IdxLt3 {
         type Error = IdxErr;
-        fn witness(input: usize) -> Result<Witnessed<usize, Self>, Self::Error> {
+
+        fn check(input: usize) -> Result<usize, Self::Error> {
             (input < 3)
-                .then(|| Witnessed::new_unchecked(input))
+                .then_some(input)
                 .ok_or(IdxErr::OutOfRange { idx: input })
         }
     }
