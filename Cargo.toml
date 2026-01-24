@@ -11,3 +11,6 @@ categories = ["rust-patterns"]
 
 [dev-dependencies]
 regex = "1"
+
+[lib]
+doctest = false
