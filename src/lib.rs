@@ -9,7 +9,7 @@ pub trait Witness<T>: Sized {
 
     /// Validate and optionally normalize the input.
     /// Returns the (possibly rewritten) value on success.
-    fn check(input: T) -> Result<T, Self::Error>;
+    fn attest(input: T) -> Result<T, Self::Error>;
 
     /// Construct a witnessed value via the crate-controlled boundary.
     #[inline]
@@ -53,7 +53,7 @@ mod impls {
     impl<T, W: Witness<T>> Witnessed<T, W> {
         #[inline]
         pub fn try_new(inner: T) -> Result<Self, W::Error> {
-            W::check(inner).map(Self::new_unchecked)
+            W::attest(inner).map(Self::new_unchecked)
         }
     }
 
@@ -71,7 +71,7 @@ mod impls {
 
         impl Witness<i32> for Pos {
             type Error = PosErr;
-            fn check(input: i32) -> Result<i32, Self::Error> {
+            fn attest(input: i32) -> Result<i32, Self::Error> {
                 (input > 0).then_some(input).ok_or(PosErr::NonPos)
             }
         }
@@ -99,7 +99,7 @@ mod impls {
 
         impl Witness<String> for TrimNonEmpty {
             type Error = StrErr;
-            fn check(input: String) -> Result<String, Self::Error> {
+            fn attest(input: String) -> Result<String, Self::Error> {
                 let s = input.trim().to_owned();
                 (!s.is_empty()).then_some(s).ok_or(StrErr::Empty)
             }
@@ -128,7 +128,7 @@ mod impls {
         impl Witness<u8> for CountOnce {
             type Error = CountErr;
 
-            fn check(input: u8) -> Result<u8, Self::Error> {
+            fn attest(input: u8) -> Result<u8, Self::Error> {
                 CALLS.fetch_add(1, Ordering::Relaxed);
                 (input == 1).then_some(input).ok_or(CountErr::Nope)
             }
@@ -161,7 +161,9 @@ mod impls {
         impl Witness<(String, u32, Vec<u8>)> for AbcW {
             type Error = AbcErr;
 
-            fn check(input: (String, u32, Vec<u8>)) -> Result<(String, u32, Vec<u8>), Self::Error> {
+            fn attest(
+                input: (String, u32, Vec<u8>),
+            ) -> Result<(String, u32, Vec<u8>), Self::Error> {
                 let (a, b, c) = input;
 
                 let a = a.trim().to_owned();
@@ -285,7 +287,7 @@ mod impl_fors {
         struct Any;
         impl Witness<i32> for Any {
             type Error = core::convert::Infallible;
-            fn check(input: i32) -> Result<i32, Self::Error> {
+            fn attest(input: i32) -> Result<i32, Self::Error> {
                 Ok(input)
             }
         }
@@ -293,7 +295,7 @@ mod impl_fors {
         struct AnyStr;
         impl Witness<&'static str> for AnyStr {
             type Error = core::convert::Infallible;
-            fn check(input: &'static str) -> Result<&'static str, Self::Error> {
+            fn attest(input: &'static str) -> Result<&'static str, Self::Error> {
                 Ok(input)
             }
         }
@@ -332,7 +334,7 @@ mod impl_fors {
             impl Witness<Vec<i32>> for AnyVec {
                 type Error = core::convert::Infallible;
 
-                fn check(input: Vec<i32>) -> Result<Vec<i32>, Self::Error> {
+                fn attest(input: Vec<i32>) -> Result<Vec<i32>, Self::Error> {
                     Ok(input)
                 }
             }
@@ -359,7 +361,7 @@ mod impl_fors {
         impl Witness<i32> for Any {
             type Error = core::convert::Infallible;
 
-            fn check(input: i32) -> Result<i32, Self::Error> {
+            fn attest(input: i32) -> Result<i32, Self::Error> {
                 Ok(input)
             }
         }
@@ -414,7 +416,7 @@ mod impl_fors {
         impl Witness<i32> for AnyI32 {
             type Error = core::convert::Infallible;
 
-            fn check(input: i32) -> Result<i32, Self::Error> {
+            fn attest(input: i32) -> Result<i32, Self::Error> {
                 Ok(input)
             }
         }
@@ -447,7 +449,7 @@ mod impl_fors {
         impl Witness<f32> for AnyF32 {
             type Error = core::convert::Infallible;
 
-            fn check(input: f32) -> Result<f32, Self::Error> {
+            fn attest(input: f32) -> Result<f32, Self::Error> {
                 Ok(input)
             }
         }
@@ -480,7 +482,7 @@ mod impl_fors {
         impl Witness<i32> for Any {
             type Error = core::convert::Infallible;
 
-            fn check(input: i32) -> Result<i32, Self::Error> {
+            fn attest(input: i32) -> Result<i32, Self::Error> {
                 Ok(input)
             }
         }
@@ -527,7 +529,7 @@ mod demo {
     impl Witness<usize> for IdxLt3 {
         type Error = IdxErr;
 
-        fn check(input: usize) -> Result<usize, Self::Error> {
+        fn attest(input: usize) -> Result<usize, Self::Error> {
             (input < 3)
                 .then_some(input)
                 .ok_or(IdxErr::OutOfRange { idx: input })
