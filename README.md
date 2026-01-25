@@ -16,7 +16,7 @@ A plain newtype wraps data, but it is still forgeable by downstream crates unles
 
 `Witnessed<T, W>` encodes `W` at the type level without owning it (`PhantomData<fn() -> W>`), so `Send`/`Sync` are driven by `T` rather than being accidentally constrained by `W`.
 
-## Example
+## Example: General Usage
 
 ```rust
 use witnessed::{Witness, Witnessed};
@@ -69,6 +69,49 @@ fn main() {
     println!("normalized = {:?}", name.as_ref()); // "hi"
 }
 ```
+
+## Zero-Cost Wrapper
+
+`Witnessed` is a **zero-cost wrapper** in terms of its memory layout and runtime performance. It uses Rust's type system to encode validation and invariants without introducing additional memory overhead. However, it's important to note that the validation or invariant checks themselves may still incur some cost at runtime.
+
+### Key Points:
+
+- **Memory Efficiency**: `Witnessed<T, W>` has the same memory size as `T` because it uses `PhantomData` to encode the witness type `W` at the type level, without storing it. Thus, there is no additional memory allocation for `W`.
+- **Validation Cost**: The cost of validating the invariants or normalizing the data (e.g., trimming strings, range checks) is still present. These checks happen during the creation of a `Witnessed` instance, and their runtime cost is unavoidable.
+- **Compile-Time Safety**: Validation rules are enforced at compile time via Rust's type system, which ensures correctness, but does not eliminate the actual runtime costs of the validation logic itself.
+
+### Example: Memory Size Test
+
+```rust
+#[cfg(test)]
+mod witness_size_tests {
+    use super::*;
+    use core::mem;
+
+    struct Any;
+    impl Witness<i32> for Any {
+        type Error = core::convert::Infallible;
+        fn attest(input: i32) -> Result<i32, Self::Error> {
+            Ok(input)
+        }
+    }
+
+    #[test]
+    fn witnessed_size_is_equal_to_inner_size() {
+        let w = Witnessed::<i32, Any>::try_new(42).unwrap();
+        // Verifies the size of `Witnessed<T, W>` is the same as `T`
+        assert_eq!(mem::size_of::<Witnessed<i32, Any>>(), mem::size_of::<i32>());
+    }
+}
+```
+
+In summary, `Witnessed` provides compile-time guarantees through the type system, but the runtime cost of validation remains an inherent part of the process.
+
+## `no_std`
+
+This crate supports `#![no_std]`: the core API (`Witness`, `Witnessed`) depends only on `core`. Unit tests use `std` via `#[cfg(test)] extern crate std;`.
+
+Note: the crate does not require `alloc`, but your own witnesses may choose to validate/normalize `String`/`Vec` etc. (which requires an allocator on the consumer side).
 
 ## Pattern
 

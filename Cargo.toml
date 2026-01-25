@@ -1,14 +1,13 @@
 [package]
 name = "witnessed"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Type-level witness wrapper for carrying validated invariants."
 license = "MIT"
 repository = "https://github.com/jcfangc/witnessed"
 readme = "README.md"
-keywords = ["witness", "invariant", "validation", "newtype"]
-categories = ["rust-patterns"]
-
+keywords = ["invariants", "validation", "newtype", "typestate", "refinement"]
+categories = ["rust-patterns", "no-std"]
 
 [lib]
 doctest = false

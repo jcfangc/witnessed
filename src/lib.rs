@@ -1,3 +1,14 @@
+#![no_std]
+// This crate is `no_std`: the public API depends only on `core`, so it can be used in
+// embedded/bare-metal or other environments without the Rust standard library.
+
+#[cfg(test)]
+#[macro_use]
+extern crate std;
+// Tests run with `std` enabled. We explicitly link `std` in the test configuration so unit tests
+// can use conveniences like `vec!`, `format!`, `String`/`Vec`, and `std`-only helpers.
+// This does not affect the library in non-test builds.
+
 use core::{marker::PhantomData, ops::Deref};
 
 /// A type-level witness that can attest `T` satisfies some invariant.
@@ -51,6 +62,10 @@ mod impls {
     use super::*;
 
     impl<T, W: Witness<T>> Witnessed<T, W> {
+        /// Validate (and optionally normalize) `inner` via `W::attest`, then wrap it.
+        ///
+        /// This is the crate-controlled construction boundary: callers cannot forge a `Witnessed`
+        /// without passing the witness check.
         #[inline]
         pub fn try_new(inner: T) -> Result<Self, W::Error> {
             W::attest(inner).map(Self::new_unchecked)
@@ -61,6 +76,7 @@ mod impls {
     mod try_new_tests {
         use super::*;
         use core::sync::atomic::{AtomicUsize, Ordering};
+        use std::{borrow::ToOwned, string::String, vec::Vec};
 
         // try_new success: returns Witnessed, and deref/as_ref can read the inner value
         struct Pos;
@@ -237,6 +253,9 @@ mod impls {
     }
     impl<T, W: Witness<T>> Witnessed<T, W> {
         /// Internal constructor; keeps `Witnessed` unforgeable across crates.
+        ///
+        /// Do NOT make this public: the entire pattern relies on forcing construction through
+        /// `W::attest` (via `try_new` / `W::witness`) so invariants cannot be bypassed downstream.
         #[inline]
         pub(crate) fn new_unchecked(inner: T) -> Self {
             Self {
@@ -282,6 +301,8 @@ mod impl_fors {
 
     #[cfg(test)]
     mod witness_debug_tests {
+        use std::{format, vec::Vec};
+
         use super::*;
 
         struct Any;
@@ -410,6 +431,7 @@ mod impl_fors {
     mod witness_ord_tests {
         use super::*;
         use core::cmp::Ordering;
+        use std::vec::Vec;
 
         // A minimal witness that always succeeds.
         struct AnyI32;
@@ -512,6 +534,88 @@ mod impl_fors {
             let b = Witnessed::<i32, Any>::try_new(2).unwrap();
             assert_ne!(hash64(&a), hash64(&b));
         }
+    }
+}
+
+#[cfg(test)]
+mod witness_size_tests {
+    use super::*;
+    use core::mem;
+    use std::{borrow::ToOwned, string::String, vec::Vec};
+
+    struct TrimNonEmpty;
+    #[derive(Debug, PartialEq, Eq)]
+    enum StrErr {
+        Empty,
+    }
+
+    impl Witness<String> for TrimNonEmpty {
+        type Error = StrErr;
+
+        fn attest(input: String) -> Result<String, Self::Error> {
+            let s = input.trim().to_owned();
+            (!s.is_empty()).then_some(s).ok_or(StrErr::Empty)
+        }
+    }
+
+    struct AnyVec;
+    #[derive(Debug, PartialEq, Eq)]
+    enum VecErr {
+        EmptyVec,
+    }
+
+    impl Witness<Vec<u8>> for AnyVec {
+        type Error = VecErr;
+
+        fn attest(input: Vec<u8>) -> Result<Vec<u8>, Self::Error> {
+            if input.is_empty() {
+                Err(VecErr::EmptyVec)
+            } else {
+                Ok(input)
+            }
+        }
+    }
+
+    struct Any;
+    impl Witness<i32> for Any {
+        type Error = core::convert::Infallible;
+
+        fn attest(input: i32) -> Result<i32, Self::Error> {
+            Ok(input)
+        }
+    }
+
+    #[test]
+    fn witnessed_size_is_equal_to_inner_size() {
+        let _ = Witnessed::<i32, Any>::try_new(42).unwrap();
+
+        // Verify the size of the wrapper type is the same as the inner type (i32).
+        assert_eq!(mem::size_of::<Witnessed<i32, Any>>(), mem::size_of::<i32>());
+    }
+
+    #[test]
+    fn witness_size_matches_for_different_types() {
+        // Check with different types to ensure the size is still the same as the inner type.
+        assert_eq!(mem::size_of::<Witnessed<i32, Any>>(), mem::size_of::<i32>());
+        assert_eq!(
+            mem::size_of::<Witnessed<String, TrimNonEmpty>>(),
+            mem::size_of::<String>()
+        );
+        assert_eq!(
+            mem::size_of::<Witnessed<Vec<u8>, AnyVec>>(),
+            mem::size_of::<Vec<u8>>()
+        );
+    }
+
+    #[test]
+    fn witness_size_for_vec() {
+        // Check the size for Vec<u8> type with the AnyVec witness.
+        let _ = Witnessed::<Vec<u8>, AnyVec>::try_new(vec![1, 2, 3]).unwrap();
+        // Verify the size of the wrapper type is the same as the inner type (Vec<u8>).
+        assert_eq!(
+            mem::size_of::<Witnessed<Vec<u8>, AnyVec>>(),
+            mem::size_of::<Vec<u8>>()
+        );
     }
 }
 
