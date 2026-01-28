@@ -4,7 +4,7 @@ A small Rust pattern for carrying validated invariants through the type system.
 
 ## Idea
 
-Define a witness `W` for some carrier type `T`. Construct `Witnessed<T, W>` only via `W::witness` (or the convenience `Witnessed::try_new`). Downstream code can then _require_ `Witnessed<...>` in function signatures, preventing “unattested value” bugs across decoupled functions/modules.
+Define a witness `W` for some carrier type `T`. Construct `Witnessed<T, W>` only via the witness boundary (`W::witness` or the convenience `Witnessed::try_new`). Downstream code can then **require** `Witnessed<...>` in function signatures, preventing “unverified value” bugs across decoupled functions/modules.
 
 A witness may also **normalize** input (e.g. trimming strings) while validating.
 
@@ -15,6 +15,16 @@ A plain newtype wraps data, but it is still forgeable by downstream crates unles
 ## Auto-traits (Send/Sync)
 
 `Witnessed<T, W>` encodes `W` at the type level without owning it (`PhantomData<fn() -> W>`), so `Send`/`Sync` are driven by `T` rather than being accidentally constrained by `W`.
+
+## `Witness<T>` API (verify required, attest optional)
+
+A witness defines an invariant for a carrier `T`.
+
+- `verify(&T) -> Result<(), Error>` is **required**: it checks the invariant on a borrowed value.
+- `attest(T) -> Result<T, Error>` is **optional**: override it when you want to **normalize** (rewrite) input while validating.
+    - The default `attest` typically calls `verify(&input)` and returns `Ok(input)`.
+
+This split keeps “check-only” invariants lightweight while still supporting normalization when needed.
 
 ## Example: General Usage
 
@@ -29,9 +39,12 @@ enum IdxErr {
 struct IdxLt3;
 impl Witness<usize> for IdxLt3 {
     type Error = IdxErr;
-    fn attest(x: usize) -> Result<usize, Self::Error> {
-        (x < 3).then_some(x).ok_or(IdxErr::OutOfRange { idx: x })
+
+    fn verify(x: &usize) -> Result<(), Self::Error> {
+        (*x < 3).then_some(()).ok_or(IdxErr::OutOfRange { idx: *x })
     }
+
+    // `attest` can be omitted: default is verify + identity.
 }
 
 fn pick(xs: &[i32; 3], idx: Witnessed<usize, IdxLt3>) -> i32 {
@@ -46,6 +59,12 @@ enum StrErr {
 struct TrimNonEmpty;
 impl Witness<String> for TrimNonEmpty {
     type Error = StrErr;
+
+    fn verify(s: &String) -> Result<(), Self::Error> {
+        (!s.trim().is_empty()).then_some(()).ok_or(StrErr::Empty)
+    }
+
+    // Override `attest` to normalize (trim) and validate the normalized value.
     fn attest(s: String) -> Result<String, Self::Error> {
         let s = s.trim().to_owned();
         (!s.is_empty()).then_some(s).ok_or(StrErr::Empty)
@@ -70,46 +89,78 @@ fn main() {
 }
 ```
 
+## `Warrant`: construct under a trusted rule (skip `attest`)
+
+Sometimes you _derive_ a value from already-witnessed inputs, and the invariant is guaranteed by a known closure property (e.g. multiplying two `ZeroOne` values still yields `ZeroOne`). In such cases, you may want to avoid re-running `attest` (and any normalization / allocations it might perform).
+
+This crate provides an `unsafe` trait:
+
+- `Warrant<T, W>` authorizes constructing `Witnessed<T, W>` from a closure **without calling `W::attest`**.
+- In **debug** builds, `W::verify(&out)` is still executed to catch violations early.
+- In **release** builds, it is **zero overhead**.
+
+> `unsafe` is on the _rule implementor_: they must ensure the produced value always satisfies the invariant.
+
+Example (sketch):
+
+```rust
+use witnessed::{Witness, Witnessed, Warrant};
+
+struct ZeroOne;
+#[derive(Debug, PartialEq)]
+enum ZErr { OutOfRange(f32) }
+
+impl Witness<f32> for ZeroOne {
+    type Error = ZErr;
+    fn verify(x: &f32) -> Result<(), Self::Error> {
+        (0.0 <= *x && *x <= 1.0).then_some(()).ok_or(ZErr::OutOfRange(*x))
+    }
+}
+
+struct Mul01;
+unsafe impl Warrant<f32, ZeroOne> for Mul01 {}
+
+fn mul01(a: Witnessed<f32, ZeroOne>, b: Witnessed<f32, ZeroOne>) -> Witnessed<f32, ZeroOne> {
+    // Warrant: if a,b∈[0,1] then a*b∈[0,1].
+    <Mul01 as Warrant<f32, ZeroOne>>::warrant(|| *a * *b)
+}
+```
+
 ## Zero-Cost Wrapper
 
-`Witnessed` is a **zero-cost wrapper** in terms of its memory layout and runtime performance. It uses Rust's type system to encode validation and invariants without introducing additional memory overhead. However, it's important to note that the validation or invariant checks themselves may still incur some cost at runtime.
+`Witnessed<T, W>` is a **zero-cost wrapper** in terms of memory layout: it has the same size as `T` because `W` is only encoded in the type system via `PhantomData`, not stored at runtime.
 
-### Key Points:
+However, validation/normalization has whatever cost your witness implements:
 
-- **Memory Efficiency**: `Witnessed<T, W>` has the same memory size as `T` because it uses `PhantomData` to encode the witness type `W` at the type level, without storing it. Thus, there is no additional memory allocation for `W`.
-- **Validation Cost**: The cost of validating the invariants or normalizing the data (e.g., trimming strings, range checks) is still present. These checks happen during the creation of a `Witnessed` instance, and their runtime cost is unavoidable.
-- **Compile-Time Safety**: Validation rules are enforced at compile time via Rust's type system, which ensures correctness, but does not eliminate the actual runtime costs of the validation logic itself.
+- `verify` costs whatever checks you perform.
+- overriding `attest` may allocate/transform (e.g. trimming a `String`) and thus may cost more.
 
 ### Example: Memory Size Test
 
 ```rust
 #[cfg(test)]
 mod witness_size_tests {
-    use super::*;
+    use witnessed::{Witness, Witnessed};
     use core::mem;
 
     struct Any;
     impl Witness<i32> for Any {
         type Error = core::convert::Infallible;
-        fn attest(input: i32) -> Result<i32, Self::Error> {
-            Ok(input)
-        }
+        fn verify(_: &i32) -> Result<(), Self::Error> { Ok(()) }
+        // `attest` can be omitted (defaults to verify + identity).
     }
 
     #[test]
     fn witnessed_size_is_equal_to_inner_size() {
-        let w = Witnessed::<i32, Any>::try_new(42).unwrap();
-        // Verifies the size of `Witnessed<T, W>` is the same as `T`
+        let _ = Witnessed::<i32, Any>::try_new(42).unwrap();
         assert_eq!(mem::size_of::<Witnessed<i32, Any>>(), mem::size_of::<i32>());
     }
 }
 ```
 
-In summary, `Witnessed` provides compile-time guarantees through the type system, but the runtime cost of validation remains an inherent part of the process.
-
 ## `no_std`
 
-This crate supports `#![no_std]`: the core API (`Witness`, `Witnessed`) depends only on `core`. Unit tests use `std` via `#[cfg(test)] extern crate std;`.
+This crate supports `#![no_std]`: the core API (`Witness`, `Witnessed`, `Warrant`) depends only on `core`. Unit tests use `std` via `#[cfg(test)] extern crate std;`.
 
 Note: the crate does not require `alloc`, but your own witnesses may choose to validate/normalize `String`/`Vec` etc. (which requires an allocator on the consumer side).
 
@@ -118,6 +169,7 @@ Note: the crate does not require `alloc`, but your own witnesses may choose to v
 - Put validation/normalization at boundaries (parsing, request decoding, DB reads).
 - Accept `Witnessed<T, W>` in internal APIs that assume the invariant.
 - Use `into_inner()` only when you explicitly want to drop the guarantee.
+- Use `Warrant` when a **trusted derivation rule** preserves the invariant and you want to skip `attest` overhead.
 
 ## Compared to `refined_type`
 
@@ -129,7 +181,7 @@ Note: the crate does not require `alloc`, but your own witnesses may choose to v
 
 In many real systems, validation depends on runtime inputs (request flags, tenant config, feature gates, A/B experiments, environment, etc.). Encoding such “dynamic rule trees” in the type system can become awkward or impossible when the rule structure is only known at runtime.
 
-With `witnessed`, you write the policy directly in `W::attest` and keep the _result_ (the proof that it passed) in the type parameter `W`. The type-level guarantee stays simple even if the validation logic is dynamic.
+With `witnessed`, you write the policy directly in `verify`/`attest` and keep the _result_ (the proof that it passed) in the type parameter `W`. The type-level guarantee stays simple even if the validation logic is dynamic.
 
 ### Trade-off: less uniformity and fewer built-in combinators
 
@@ -181,7 +233,8 @@ By making the target an explicit generic parameter:
 ```rust
 pub trait Witness<T>: Sized {
     type Error;
-    fn attest(input: T) -> Result<T, Self::Error>;
+    fn verify(input: &T) -> Result<(), Self::Error>;
+    fn attest(input: T) -> Result<T, Self::Error>; // optional to override
 }
 ```
 
@@ -196,22 +249,6 @@ impl<T> Witness<Vec<T>> for NonEmpty { /* ... */ }
 
 This is a better fit for a small “pattern” crate: it keeps the witness as a reusable _logic label_,
 while `T` is the concrete carrier being validated/normalized.
-
-### What we give up by not using `type Target`
-
-Using an associated `Target` can produce simpler type names in some designs,
-especially when the witness type _is itself_ a domain object (e.g. `Email`, `UserId`, `OrderId`)
-where you never intend to witness any other carrier:
-
-```rust
-struct Email; // semantically bound to `String` forever
-```
-
-In that strongly domain-coupled style, `type Target` can read nicely and prevent misuse by construction.
-
-`witnessed` chooses the opposite end: it optimizes for **reusable invariants** rather than **one-off domain wrappers**.
-If you want a domain-specific refined type, you can still build it on top of `Witness<T>`
-by defining a dedicated witness type per domain concept.
 
 ### Why `Error` stays an associated type
 
