@@ -1,4 +1,4 @@
-use crate::{Witness, Witnessed};
+use crate::intrinsic::{Witness, Witnessed};
 
 /// A marker trait authorizing skipping `W::attest` for constructing `Witnessed<T, W>`.
 ///
@@ -85,8 +85,7 @@ mod tests {
         let _ = Mul01::warrant(|| 1.2);
     }
 
-    // to prove warrant does NOT call attest (only verify in debug)
-    static ATTEST: AtomicUsize = AtomicUsize::new(0);
+    // prove warrant does not do any extra checks in release, and only one verify in debug
     static VERIFY: AtomicUsize = AtomicUsize::new(0);
 
     struct Counted01;
@@ -98,35 +97,24 @@ mod tests {
             VERIFY.fetch_add(1, Ordering::Relaxed);
             ZeroOne::verify(x)
         }
-
-        #[inline]
-        fn attest(x: f32) -> Result<f32, Self::Error> {
-            ATTEST.fetch_add(1, Ordering::Relaxed);
-            ZeroOne::verify(&x).map(|_| x)
-        }
     }
 
     struct MulCounted01;
     unsafe impl Warrant<f32, Counted01> for MulCounted01 {}
 
     #[test]
-    fn warrant_skips_attest() {
-        ATTEST.store(0, Ordering::Relaxed);
+    fn warrant_only_verifies_in_debug() {
         VERIFY.store(0, Ordering::Relaxed);
 
-        let a = Witnessed::<f32, Counted01>::try_new(0.4).unwrap(); // ATTEST = 1
-        let b = Witnessed::<f32, Counted01>::try_new(0.5).unwrap(); // ATTEST = 2
-        assert_eq!(ATTEST.load(Ordering::Relaxed), 2);
+        let a = Witnessed::<f32, Counted01>::try_new(0.4).unwrap(); // verify += 1
+        let b = Witnessed::<f32, Counted01>::try_new(0.5).unwrap(); // verify += 1
+        assert_eq!(VERIFY.load(Ordering::Relaxed), 2);
 
-        let _c = MulCounted01::warrant(|| *a * *b); // VERIFY += 1 in debug
+        let _c = MulCounted01::warrant(|| *a * *b);
 
-        // warrant should NOT call attest
-        assert_eq!(ATTEST.load(Ordering::Relaxed), 2);
-
-        // in debug, warrant calls verify once
         #[cfg(debug_assertions)]
-        assert_eq!(VERIFY.load(Ordering::Relaxed), 1);
+        assert_eq!(VERIFY.load(Ordering::Relaxed), 3); // warrant verify += 1
         #[cfg(not(debug_assertions))]
-        assert_eq!(VERIFY.load(Ordering::Relaxed), 0);
+        assert_eq!(VERIFY.load(Ordering::Relaxed), 2); // no extra verify
     }
 }

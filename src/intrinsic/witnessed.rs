@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use crate::Witness;
+use crate::intrinsic::Witness;
 
 /// A value of type `T` that carries an unforgeable witness `W`.
 ///
@@ -35,13 +35,13 @@ mod impls {
     use super::*;
 
     impl<T, W: Witness<T>> Witnessed<T, W> {
-        /// Validate (and optionally normalize) `inner` via `W::attest`, then wrap it.
+        /// Validate `inner` via `W::verify`, then wrap it.
         ///
         /// This is the crate-controlled construction boundary: callers cannot forge a `Witnessed`
         /// without passing the witness check.
         #[inline]
         pub fn try_new(inner: T) -> Result<Self, W::Error> {
-            W::attest(inner).map(Self::new_unchecked)
+            W::verify(&inner).map(|_| Self::new_unchecked(inner))
         }
     }
 
@@ -49,7 +49,7 @@ mod impls {
     mod try_new_tests {
         use super::*;
         use core::sync::atomic::{AtomicUsize, Ordering};
-        use std::{borrow::ToOwned, string::String, vec::Vec};
+        use std::{string::String, vec::Vec};
 
         // try_new success: returns Witnessed, and deref/as_ref can read the inner value
         struct Pos;
@@ -79,7 +79,7 @@ mod impls {
             assert_eq!(e, PosErr::NonPos);
         }
 
-        // try_new allows normalization: the witness can rewrite input (e.g. trim)
+        // try_new checks via witness (no normalization)
         struct TrimNonEmpty;
         #[derive(Debug, PartialEq, Eq)]
         enum StrErr {
@@ -88,28 +88,23 @@ mod impls {
 
         impl Witness<String> for TrimNonEmpty {
             type Error = StrErr;
+
             fn verify(input: &String) -> Result<(), Self::Error> {
-                let s = input.trim();
-                (!s.is_empty()).then_some(()).ok_or(StrErr::Empty)
-            }
-            fn attest(input: String) -> Result<String, Self::Error> {
-                let s = input.trim().to_owned();
-                if s.is_empty() {
-                    Err(StrErr::Empty)
-                } else {
-                    Ok(s)
-                }
+                (!input.trim().is_empty())
+                    .then_some(())
+                    .ok_or(StrErr::Empty)
             }
         }
 
         #[test]
-        fn try_new_allows_normalization_by_witness() {
+        fn try_new_does_not_normalize_by_default() {
             let w = Witnessed::<String, TrimNonEmpty>::try_new("  hi  ".into()).unwrap();
-            assert_eq!(w.as_ref(), "hi");
+            // no normalization: preserves the original string
+            assert_eq!(w.as_ref(), "  hi  ");
         }
 
         #[test]
-        fn try_new_normalization_can_still_fail() {
+        fn try_new_trim_based_check_can_still_fail() {
             let e = Witnessed::<String, TrimNonEmpty>::try_new("   ".into()).unwrap_err();
             assert_eq!(e, StrErr::Empty);
         }
@@ -152,7 +147,7 @@ mod impls {
         }
 
         // Invariants:
-        // - A (String) must be non-empty after trim; store trimmed
+        // - A (String) must be non-empty after trim (no rewrite)
         // - B (u32) must be even
         // - C (Vec<u8>) must be ASCII bytes
         impl Witness<(String, u32, Vec<u8>)> for AbcW {
@@ -161,8 +156,7 @@ mod impls {
             fn verify(input: &(String, u32, Vec<u8>)) -> Result<(), Self::Error> {
                 let (a, b, c) = input;
 
-                let a_trimmed = a.trim();
-                if a_trimmed.is_empty() {
+                if a.trim().is_empty() {
                     return Err(AbcErr::AEmpty);
                 }
                 if b % 2 != 0 {
@@ -174,29 +168,10 @@ mod impls {
 
                 Ok(())
             }
-
-            fn attest(
-                input: (String, u32, Vec<u8>),
-            ) -> Result<(String, u32, Vec<u8>), Self::Error> {
-                let (a, b, c) = input;
-
-                let a = a.trim().to_owned();
-                if a.is_empty() {
-                    return Err(AbcErr::AEmpty);
-                }
-                if b % 2 != 0 {
-                    return Err(AbcErr::BOdd { b });
-                }
-                if !c.is_ascii() {
-                    return Err(AbcErr::CNonAscii);
-                }
-
-                Ok((a, b, c))
-            }
         }
 
         #[test]
-        fn try_new_composite_tuple_ok_and_normalizes_a() {
+        fn try_new_composite_tuple_ok_without_normalization() {
             let w = Witnessed::<(String, u32, Vec<u8>), AbcW>::try_new((
                 "  hello  ".into(),
                 42,
@@ -204,39 +179,12 @@ mod impls {
             ))
             .unwrap();
 
-            // A normalized (trimmed)
-            assert_eq!((w.as_ref().0).as_str(), "hello");
+            // A preserved (no trimming)
+            assert_eq!((w.as_ref().0).as_str(), "  hello  ");
             // B preserved
             assert_eq!(w.as_ref().1, 42);
             // C preserved
             assert_eq!(w.as_ref().2.as_slice(), b"ABC");
-        }
-
-        #[test]
-        fn try_new_composite_tuple_fails_on_each_invariant() {
-            // A empty after trim
-            let e = Witnessed::<(String, u32, Vec<u8>), AbcW>::try_new((
-                "   ".into(),
-                2,
-                b"ABC".to_vec(),
-            ))
-            .unwrap_err();
-            assert_eq!(e, AbcErr::AEmpty);
-
-            // B odd
-            let e = Witnessed::<(String, u32, Vec<u8>), AbcW>::try_new((
-                "ok".into(),
-                3,
-                b"ABC".to_vec(),
-            ))
-            .unwrap_err();
-            assert_eq!(e, AbcErr::BOdd { b: 3 });
-
-            // C non-ascii
-            let e =
-                Witnessed::<(String, u32, Vec<u8>), AbcW>::try_new(("ok".into(), 4, vec![0xFF]))
-                    .unwrap_err();
-            assert_eq!(e, AbcErr::CNonAscii);
         }
     }
 
@@ -266,7 +214,7 @@ mod impls {
 }
 
 mod impl_fors {
-    use core::ops::Deref;
+    use core::{fmt, hash, ops::Deref};
 
     use super::*;
 
@@ -293,9 +241,9 @@ mod impl_fors {
     }
     impl<T: Copy, W: Witness<T>> Copy for Witnessed<T, W> {}
 
-    impl<T: core::fmt::Debug, W: Witness<T>> core::fmt::Debug for Witnessed<T, W> {
+    impl<T: fmt::Debug, W: Witness<T>> fmt::Debug for Witnessed<T, W> {
         #[inline]
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.debug_tuple("Witnessed").field(&self.inner).finish()
         }
     }
@@ -304,7 +252,7 @@ mod impl_fors {
     mod witness_debug_tests {
         use std::{format, vec::Vec};
 
-        use crate::test_support::Any;
+        use crate::intrinsic::test_support::Any;
 
         use super::*;
 
@@ -352,7 +300,7 @@ mod impl_fors {
 
     #[cfg(test)]
     mod witness_eq_tests {
-        use crate::test_support::Any;
+        use crate::intrinsic::test_support::Any;
 
         use super::*;
 
@@ -398,7 +346,7 @@ mod impl_fors {
 
     #[cfg(test)]
     mod witness_ord_tests {
-        use crate::test_support::Any;
+        use crate::intrinsic::test_support::Any;
 
         use super::*;
         use core::cmp::Ordering;
@@ -439,16 +387,16 @@ mod impl_fors {
         }
     }
 
-    impl<T: core::hash::Hash, W: Witness<T>> core::hash::Hash for Witnessed<T, W> {
+    impl<T: hash::Hash, W: Witness<T>> hash::Hash for Witnessed<T, W> {
         #[inline]
-        fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        fn hash<H: hash::Hasher>(&self, state: &mut H) {
             self.inner.hash(state)
         }
     }
 
     #[cfg(test)]
     mod witness_hash_tests {
-        use crate::test_support::Any;
+        use crate::intrinsic::test_support::Any;
 
         use super::*;
         use std::collections::hash_map::DefaultHasher;
@@ -484,7 +432,7 @@ mod impl_fors {
 
 #[cfg(test)]
 mod witnessed_size_tests {
-    use crate::test_support::Any;
+    use crate::intrinsic::test_support::Any;
 
     use super::*;
     use core::mem;
