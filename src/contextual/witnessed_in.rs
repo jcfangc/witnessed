@@ -3,70 +3,126 @@ use core::marker::PhantomData;
 use crate::contextual::WitnessIn;
 
 /// A value of type `T` that carries an unforgeable, *environment-dependent* witness `W`
-/// under a concrete environment `Env`.
+/// under some environment `Env`.
 ///
 /// This is the contextual counterpart of [`Witnessed<T, W>`]:
 ///
 /// - [`Witnessed<T, W>`] models an *absolute* invariant `W(T)`.
 /// - `WitnessedIn<'a, Env, T, W>` models a *relative* invariant `W(Env, T)`.
 ///
+/// In other words, the carried proof should be read as:
+///
+/// > `inner` satisfies `W` **with respect to** some environment `env: &'a Env`.
+///
 /// # Invariant & construction
 ///
-/// `WitnessedIn<'a, Env, T, W>` can only be constructed through the crate-controlled boundary
-/// (e.g. `W::witness_in` / `WitnessedIn::try_new_in`), which must validate `inner` against the
-/// provided `env`. By keeping the internal constructor crate-private, downstream crates cannot
-/// forge a `WitnessedIn` and must pass through the witness boundary.
+/// `WitnessedIn<'a, Env, T, W>` can only be constructed through the crate-controlled witness
+/// boundary (for example `W::witness_in` or `WitnessedIn::try_new_in`), which must validate
+/// `inner` against a concrete `&'a Env`.
 ///
-/// # Environment binding
+/// The actual environment reference is **not stored at runtime**. Instead, the dependency on
+/// `&'a Env` is encoded purely at the type level. This keeps the runtime representation minimal
+/// while still allowing the compiler to track that the proof is only valid for values tied to
+/// that environment lifetime.
 ///
-/// This wrapper *binds* the proof to a particular environment reference `&'a Env`.
-/// The carried witness should be interpreted as:
+/// # Why `PhantomData<fn(&'a Env) -> W>`
 ///
-/// > "`inner` satisfies `W` **with respect to** `env`"
+/// The marker field is intentionally written as:
 ///
-/// Moving the value does not detach it from its environment; the `env` reference is stored
-/// alongside the value.
+/// `PhantomData<fn(&'a Env) -> W>`
 ///
-/// # Auto-traits (Send/Sync/Unpin)
+/// rather than forms such as:
 ///
-/// Auto-traits are primarily driven by `T` and `&Env`.
+/// - `PhantomData<&'a Env>`
+/// - `PhantomData<(&'a Env, W)>`
+/// - `PhantomData<W>`
 ///
-/// - `WitnessedIn` is `Send`/`Sync` only if `T` is `Send`/`Sync` **and** `Env` is `Sync`
-///   (because it stores `&Env`).
-/// - The marker field uses `PhantomData<fn() -> W>` intentionally: it encodes `W` at the type
-///   level without *owning* a `W`, so auto-traits are not accidentally constrained by `W`.
-///   (Using `PhantomData<W>` would propagate `W`'s auto-traits and unnecessarily restrict
-///   `WitnessedIn`.)
+/// This choice serves two purposes:
+///
+/// 1. It binds the type to the environment lifetime `'a` and environment type `Env`
+///    **without actually storing** an `&'a Env`.
+/// 2. It mentions `W` only at the type level, without treating `WitnessedIn` as if it
+///    *owned* a `W`.
+///
+/// Semantically, this says:
+///
+/// > this type is parameterized by a proof relation from `&'a Env` to witness `W`,
+/// > but does not physically contain either one.
+///
+/// This is exactly what we want for a contextual proof wrapper:
+///
+/// - the proof is *about* an environment,
+/// - the value does not need to store that environment,
+/// - and the witness type should not impose ownership-style auto-trait constraints.
+///
+/// # Why the environment is not stored
+///
+/// A contextual witness often only needs the environment at the *construction boundary*,
+/// where validation happens. After that, the runtime payload can remain just `T`.
+///
+/// Keeping `env` out of the runtime layout has several advantages:
+///
+/// - no extra pointer/reference field,
+/// - no need to carry the environment through every move at runtime,
+/// - and a cleaner separation between:
+///   - runtime data: `inner`,
+///   - compile-time proof context: `&'a Env`, `W`.
+///
+/// # Auto-traits
+///
+/// `WitnessedIn` should behave like a wrapper around `T`, while still being logically tied
+/// to `&'a Env`.
+///
+/// Because the marker uses `PhantomData<fn(&'a Env) -> W>`:
+///
+/// - `Env` and `'a` participate in type/lifetime checking,
+/// - but `WitnessedIn` does **not** behave as though it owns an `&'a Env`,
+/// - and it does **not** behave as though it owns a `W`.
+///
+/// This is preferable to `PhantomData<W>`, which would make auto-traits propagate through `W`
+/// as if a `W` value were actually stored.
 ///
 /// # Important note
 ///
-/// This wrapper avoids exposing `&mut T`, but if `T` has interior mutability (e.g. `Cell`,
-/// `RefCell`, `Mutex`), the invariant is only as strong as `T`'s own semantics.
+/// `WitnessedIn` prevents downstream code from forging the proof, but it does not magically
+/// freeze the logical world around it.
 ///
-/// Also note that the meaning of the witness depends on the stability of `env`. If `env` is
-/// mutated in a way that invalidates previously-checked values, the logical guarantee no longer
-/// holds. Prefer immutable or versioned environments.
-#[repr(C)]
+/// If the meaning of `W(Env, T)` depends on facts about `env` that can later change, then the
+/// guarantee is only as stable as that environment model. In practice, this pattern works best
+/// when:
+///
+/// - `env` is immutable,
+/// - or the validated relation is stable under later changes,
+///
+/// Also note that if `T` itself permits interior mutation, the invariant is only as strong as
+/// the semantics exposed by `T`.
+#[repr(transparent)]
 pub struct WitnessedIn<'a, Env: ?Sized, T, W: WitnessIn<T, Env>> {
-    /// The environment reference this proof is relative to.
-    env: &'a Env,
-    /// The witnessed value.
+    /// The witnessed runtime value.
     inner: T,
-    /// Type-level witness marker (does not own `W`).
-    _marker: PhantomData<fn() -> W>,
+    /// Type-level binding to the contextual witness relation `W(Env, T)`.
+    ///
+    /// This does not store either `&'a Env` or `W`; it only encodes their participation in the
+    /// type system.
+    _marker: PhantomData<fn(&'a Env) -> W>,
 }
 
 mod impls {
     use super::*;
 
     impl<'a, Env: ?Sized, T, W: WitnessIn<T, Env>> WitnessedIn<'a, Env, T, W> {
-        /// Validate `inner` via `W::verify_in(env, ...)`, then wrap it with the same `env`.
+        /// Validate `inner` via `W::verify_in(env, ...)`, then construct a `WitnessedIn`
+        /// tied to the same environment lifetime `'a`.
         ///
-        /// This is the crate-controlled construction boundary: callers cannot forge a `WitnessedIn`
-        /// without passing the witness check against `env`.
+        /// The environment reference is **not stored at runtime**; it is only tracked
+        /// at the type level so the resulting witness cannot outlive the environment
+        /// used for validation.
+        ///
+        /// This is the crate-controlled construction boundary: callers cannot forge
+        /// a `WitnessedIn` without passing the witness check relative to `env`.
         #[inline]
         pub fn try_new_in(env: &'a Env, inner: T) -> Result<Self, W::Error> {
-            W::verify_in(env, &inner).map(|_| Self::new_unchecked(env, inner))
+            W::verify_in(env, &inner).map(|_| Self::new_unchecked(inner))
         }
     }
 
@@ -84,7 +140,6 @@ mod impls {
             let w = WitnessedIn::<[f32], f32, Normalized>::try_new_in(env.as_slice(), 0.3).unwrap();
 
             assert_eq!(*w, 0.3);
-            assert!(core::ptr::eq(w.env(), env.as_slice()));
             assert!(Normalized::verify_in(env.as_slice(), w.as_ref()).is_ok());
         }
 
@@ -179,8 +234,9 @@ mod impls {
             let w =
                 WitnessedIn::<MaxLen, String, StrNonEmptyAndMax>::try_new_in(&env, "hello".into())
                     .unwrap();
+
             assert_eq!(w.as_ref(), "hello");
-            assert!(core::ptr::eq(w.env(), &env));
+            assert!(StrNonEmptyAndMax::verify_in(&env, w.as_ref()).is_ok());
         }
 
         #[test]
@@ -258,7 +314,7 @@ mod impls {
             assert_eq!((w.as_ref().0).as_str(), "  hello  "); // no normalization
             assert_eq!(w.as_ref().1, 42);
             assert_eq!(w.as_ref().2.as_slice(), b"ABC");
-            assert!(core::ptr::eq(w.env(), &env));
+            assert!(AbcIn::verify_in(&env, w.as_ref()).is_ok());
         }
 
         #[test]
@@ -302,26 +358,12 @@ mod impls {
     }
 
     impl<'a, Env: ?Sized, T, W: WitnessIn<T, Env>> WitnessedIn<'a, Env, T, W> {
-        /// Borrow the environment this proof is relative to.
-        #[inline]
-        pub fn env(&self) -> &'a Env {
-            self.env
-        }
-
         /// Consume and return the inner value.
         ///
         /// Note: extracting `T` loses the witness guarantee in the type system.
         #[inline]
         pub fn into_inner(self) -> T {
             self.inner
-        }
-
-        /// Consume and return both the environment reference and the inner value.
-        ///
-        /// Note: extracting `T` loses the witness guarantee in the type system.
-        #[inline]
-        pub fn into_parts(self) -> (&'a Env, T) {
-            (self.env, self.inner)
         }
     }
 
@@ -332,9 +374,8 @@ mod impls {
         /// `W::verify_in` (via `try_new_in` / `W::witness_in`) so invariants cannot be bypassed
         /// downstream.
         #[inline]
-        pub(crate) fn new_unchecked(env: &'a Env, inner: T) -> Self {
+        pub(crate) fn new_unchecked(inner: T) -> Self {
             Self {
-                env,
                 inner,
                 _marker: PhantomData,
             }
@@ -365,7 +406,7 @@ mod impl_fors {
     impl<'a, Env: ?Sized, T: Clone, W: WitnessIn<T, Env>> Clone for WitnessedIn<'a, Env, T, W> {
         #[inline]
         fn clone(&self) -> Self {
-            Self::new_unchecked(self.env, self.inner.clone())
+            Self::new_unchecked(self.inner.clone())
         }
     }
 
@@ -455,7 +496,7 @@ mod impl_fors {
         #[test]
         fn equality_ignores_env_identity_by_design() {
             // Two different env values, both valid, both containing x.
-            // Since PartialEq compares inner only, these are equal as long as inner is equal.
+            // PartialEq intentionally compares inner only, not the construction environment.
             let env1 = vec![0.2, 0.3, 0.5];
             let env2 = vec![0.3, 0.2, 0.5];
 
@@ -465,7 +506,6 @@ mod impl_fors {
                 WitnessedIn::<[f32], f32, Normalized>::try_new_in(env2.as_slice(), 0.3).unwrap();
 
             assert_eq!(a, b);
-            assert_ne!(core::ptr::eq(a.env(), b.env()), true);
         }
 
         #[test]

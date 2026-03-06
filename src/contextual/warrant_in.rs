@@ -1,23 +1,44 @@
 use crate::contextual::{WitnessIn, WitnessedIn};
 
-/// A marker trait authorizing skipping `W::verify_in(env, ..)` for constructing
-/// `WitnessedIn<'a, Env, T, W>` under a concrete environment `env`.
+/// A marker trait authorizing construction of `WitnessedIn<'a, Env, T, W>`
+/// without running `W::verify_in(env, ..)` in release builds.
+///
+/// This trait represents a *trusted derivation rule* for contextual witnesses.
+/// It is analogous to a proof rule in a logic system: if the premises are known
+/// to satisfy the invariant under a given environment, the conclusion may be
+/// constructed without rechecking the invariant.
+///
+/// The returned witness is **type-level bound** to the lifetime `'a` of `env`,
+/// but the environment reference itself is **not stored at runtime**.
 ///
 /// # Safety
-/// Implementors must guarantee that values produced under this warrant satisfy `W`'s invariant
-/// **with respect to the provided `env`**, assuming any `WitnessedIn` inputs used to compute them
-/// are valid under the same `env`.
 ///
-/// In other words, the rule must be *closed* under the same environment instance.
+/// Implementors must guarantee that values produced under this warrant satisfy
+/// `W(Env, T)` **with respect to the same environment instance `env`** used at
+/// construction.
+///
+/// If the rule combines multiple `WitnessedIn` inputs, those inputs must have
+/// been validated relative to that same environment.
+///
+/// In other words, the rule must be *closed under the same environment instance*.
+///
+/// # Debug checking
+///
+/// In debug builds, `warrant_in` performs a defensive `W::verify_in(env, &out)`
+/// and panics if the warrant is violated. In release builds this check is
+/// skipped, so the rule must be correct.
+
 pub unsafe trait WarrantIn<T, Env: ?Sized, W: WitnessIn<T, Env>> {
     /// # Warrant
-    /// It is **strongly recommended** to document, at each call site, why `f()` is guaranteed
-    /// to satisfy `W`'s invariant under `env`. This makes reviews and audits easier, because
-    /// `warrant_in` intentionally skips `W::verify_in` in release builds.
+    ///
+    /// It is strongly recommended to document, at each call site, why `f()` is
+    /// guaranteed to satisfy `W` under `env`.
     ///
     /// Suggested call-site pattern:
+    ///
     /// ```ignore
     /// // Warrant: under this env, combining two normalized values yields a normalized value.
+    /// // `a` and `b` were validated under the same env.
     /// let x: WitnessedIn<'_, EnvTy, f32, NormW> =
     ///     <Rule as WarrantIn<f32, EnvTy, NormW>>::warrant_in(env, || combine(*a, *b));
     /// ```
@@ -30,38 +51,7 @@ pub unsafe trait WarrantIn<T, Env: ?Sized, W: WitnessIn<T, Env>> {
                 panic!("warrant violated witness");
             }
         }
-        WitnessedIn::new_unchecked(env, out)
-    }
-}
-
-use crate::intrinsic::{Witness, Witnessed};
-
-/// A marker trait authorizing skipping `W::attest` for constructing `Witnessed<T, W>`.
-///
-/// # Safety
-/// Implementors must guarantee that values produced under this warrant satisfy `W`'s invariant,
-/// assuming any `Witnessed<T, W>` inputs used to compute them are valid.
-pub unsafe trait Warrant<T, W: Witness<T>> {
-    /// # Warrant
-    /// It is **strongly recommended** to document, at each call site, why `f()` is guaranteed
-    /// to satisfy `W`'s invariant. This makes reviews and audits easier, because `warrant`
-    /// intentionally skips `W::attest`.
-    ///
-    /// Suggested call-site pattern:
-    /// ```ignore
-    /// // Warrant: if a,b in [0,1] then a*b in [0,1].
-    /// let x: Witnessed<f32, ZeroOne> = <Mul01 as Warrant<f32, ZeroOne>>::warrant(|| *a * *b);
-    /// ```
-    #[inline]
-    fn warrant(f: impl FnOnce() -> T) -> Witnessed<T, W> {
-        let out = f();
-        #[cfg(debug_assertions)]
-        {
-            if W::verify(&out).is_err() {
-                panic!("warrant violated witness");
-            }
-        }
-        Witnessed::new_unchecked(out)
+        WitnessedIn::new_unchecked(out)
     }
 }
 
@@ -95,7 +85,6 @@ mod warrant_in_tests {
         let c = AddMember01::warrant_in(env, || *a + *b);
 
         assert!((*c - 0.5).abs() < 1e-6);
-        assert!(core::ptr::eq(c.env(), env));
         assert!(Normalized::verify_in(env, c.as_ref()).is_ok());
     }
 

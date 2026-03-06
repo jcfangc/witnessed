@@ -14,9 +14,13 @@ A plain newtype wraps data, but it is still forgeable by downstream crates unles
 
 ## Auto-traits (Send/Sync)
 
-`Witnessed<T, W>` encodes `W` at the type level without owning it (`PhantomData<fn() -> W>`), so `Send`/`Sync` are driven by `T` rather than being accidentally constrained by `W`.
+`Witnessed<T, W>` encodes `W` purely at the type level (`PhantomData<fn() -> W>`), so auto-traits such as `Send`/`Sync` are driven by `T` rather than being accidentally constrained by `W`.
 
-For the contextual wrapper `WitnessedIn<'a, Env, T, W>`, auto-traits are driven by both `T` and the stored `&'a Env` (because the env reference is carried at runtime).
+For the contextual wrapper `WitnessedIn<'a, Env, T, W>`, the environment is **not stored at runtime**. The dependency on `Env` only appears in the type system via `PhantomData<fn(&'a Env) -> W>`. As a result:
+
+- the runtime representation contains only `T`
+- auto-traits are determined by `T`
+- the lifetime `'a` ensures the witness cannot outlive the environment used for validation
 
 ---
 
@@ -81,6 +85,10 @@ fn main() {
 ---
 
 # Contextual (environment-dependent) API
+
+Note: the environment reference is used only during validation.
+
+The resulting `WitnessedIn` value **does not store the environment at runtime**. Instead, the type system tracks that the witness is tied to the lifetime of the environment used for validation.
 
 Some invariants are not intrinsic properties of `T`, but relations that only make sense **relative to some environment**:
 
@@ -169,7 +177,7 @@ fn main() {
     let x = WitnessedIn::<[f32], f32, Normalized>::try_new_in(env.as_slice(), 0.3).unwrap();
 
     assert_eq!(*x, 0.3);
-    assert!(core::ptr::eq(x.env(), env.as_slice()));
+    assert!(Normalized::verify_in(env.as_slice(), x.as_ref()).is_ok());
 }
 ```
 
@@ -253,15 +261,19 @@ fn derive<'a>(
 
 `Witnessed<T, W>` is a **zero-cost wrapper** in terms of memory layout: it has the same size as `T` because `W` is only encoded in the type system via `PhantomData`, not stored at runtime.
 
-## Contextual carries an environment reference
+## Contextual representation
 
-`WitnessedIn<'a, Env, T, W>` stores:
+`WitnessedIn<'a, Env, T, W>` stores only the runtime value `T`.
 
-- the environment reference `&'a Env`
-- the value `T`
-- the type-level marker `W`
+The dependency on the environment is tracked purely at the type level via `PhantomData<fn(&'a Env) -> W>`. The environment reference is **not stored**.
 
-So it is not `repr(transparent)` over `T`. The environment binding is intentional: it keeps the meaning of the witness “attached” to the environment.
+This design ensures:
+
+- the witness cannot outlive the environment used for validation
+- no environment pointer needs to be carried at runtime
+- the runtime layout remains minimal
+
+`WitnessedIn` is therefore `repr(transparent)` over `T`.
 
 ---
 
@@ -279,6 +291,8 @@ Note: the crate does not require `alloc`, but your own witnesses may choose to v
 - Accept `Witnessed<T, W>` or `WitnessedIn<'a, Env, T, W>` in internal APIs that assume the invariant.
 - Use `into_inner()` only when you explicitly want to drop the guarantee.
 - Use `Warrant` / `WarrantIn` when a **trusted derivation rule** preserves the invariant and you want to skip checks in release.
+
+When using contextual witnesses, ensure that derived values are constructed relative to the same environment instance that validated their inputs.
 
 ---
 
