@@ -1,42 +1,50 @@
 # witnessed
 
-A small Rust pattern for carrying validated invariants through the type system.
+[![crates.io](https://img.shields.io/crates/v/witnessed.svg)](https://crates.io/crates/witnessed)
+
+A small Rust pattern for carrying boundary-established facts through the type system.
 
 `witnessed` separates:
 
-- **validation at boundaries**
-- **trusted use inside the program**
+* **witness production at boundaries**
+* **trusted use inside the program**
 
-A value becomes `Witnessed<..., W>` only after passing witness `W`.  
+A value becomes `Witnessed<T, W>` only after a witness token `W` has been produced for it.
+
 This helps prevent “unchecked value slipped into internal logic” bugs across decoupled modules.
-
-This crate models witnesses as **pure checks**:
-
-- a witness verifies facts
-- it does not rewrite values
 
 ---
 
 ## Core idea
 
-Define a witness `W` for a carrier type `T`.
+`Witnessed<T, W>` is a transparent wrapper over `T`.
 
-Construct:
+The type parameter `W` is a **witness token type**. It represents a fact that has been established for the wrapped value.
 
-- `Witnessed<T, W>` for intrinsic invariants
-- `WitnessedInRef<'a, Env, T, W>` for contextual invariants tied to `&'a Env`
-- `WitnessedInOwned<Env, T, W>` for contextual invariants validated against `&Env` without carrying a borrow lifetime
+`W` is not required to implement a trait.
 
-Internal APIs can then require witnessed values directly.
+Instead, a value is witnessed through a proof-producing function or closure:
+
+```rust
+use witnessed::WitnessExt;
+
+let witnessed = value.witness().by(W::prove)?;
+```
+
+Conceptually:
+
+```text
+witness this value by producing W
+```
+
+The witness token `W` is used only at the construction boundary. It is not stored at runtime.
 
 ---
 
-## Intrinsic API
-
-Use `Witness<T>` for invariants that depend only on `T`.
+## Example
 
 ```rust
-use witnessed::{Witness, Witnessed};
+use witnessed::{WitnessExt, Witnessed};
 
 #[derive(Debug, PartialEq, Eq)]
 enum IdxErr {
@@ -45,204 +53,188 @@ enum IdxErr {
 
 struct IdxLt3;
 
-impl Witness<usize> for IdxLt3 {
-    type Error = IdxErr;
-
-    fn verify(x: &usize) -> Result<(), Self::Error> {
-        (*x < 3).then_some(()).ok_or(IdxErr::OutOfRange { idx: *x })
+impl IdxLt3 {
+    fn prove(idx: &usize) -> Result<Self, IdxErr> {
+        (*idx < 3)
+            .then_some(Self)
+            .ok_or(IdxErr::OutOfRange { idx: *idx })
     }
 }
 
 fn pick(xs: &[i32; 3], idx: Witnessed<usize, IdxLt3>) -> i32 {
     xs[*idx]
 }
+
+fn main() -> Result<(), IdxErr> {
+    let idx = 2usize.witness().by(IdxLt3::prove)?;
+
+    assert_eq!(pick(&[10, 20, 30], idx), 30);
+
+    Ok(())
+}
+```
+
+The internal function `pick` does not accept a raw `usize`. It requires `Witnessed<usize, IdxLt3>`, so callers must cross the witnessing boundary first.
+
+---
+
+## API shape
+
+The primary construction path is:
+
+```rust
+value.witness().by(prove)?
+```
+
+where `prove` has this shape:
+
+```rust
+FnOnce(&T) -> Result<W, E>
+```
+
+For example:
+
+```rust
+let x = raw.witness().by(MyWitness::prove)?;
+```
+
+or with a closure:
+
+```rust
+let x = raw.witness().by(|value| MyWitness::prove_with(&env, value))?;
+```
+
+The result is:
+
+```rust
+Result<Witnessed<T, W>, E>
 ```
 
 ---
 
-## Contextual API
+## Context-dependent witnesses
 
-Some invariants only make sense relative to an environment.
+Context-dependent facts do not require a special wrapper type.
 
-Examples:
-
-- thresholds from config
-- indices checked against a specific container
-- values validated relative to precomputed stats
-- facts defined with respect to a shared context
-
-`witnessed` provides:
-
-- `WitnessIn<T, Env>`
-- `WitnessedInRef<'a, Env, T, W>`
-- `WitnessedInOwned<Env, T, W>`
-
-### Borrowed contextual witness
-
-Use `WitnessedInRef` when the proof should be tied to the lifetime of a concrete borrowed environment.
+Capture the context in the proof-producing closure:
 
 ```rust
-use witnessed::contextual::{WitnessIn, WitnessedInRef};
+use witnessed::WitnessExt;
 
-struct Normalized;
+struct InRange;
 
-#[derive(Debug, PartialEq)]
-enum NormErr {
-    EnvEmpty,
-    EnvNonFinite,
-    EnvSumNotOne { sum: f32 },
-    ValueNonFinite,
-    NotMember { x: f32 },
+#[derive(Debug, PartialEq, Eq)]
+enum RangeErr {
+    OutOfRange { value: i32 },
 }
 
-impl WitnessIn<f32, [f32]> for Normalized {
-    type Error = NormErr;
+struct Range {
+    start: i32,
+    end_excl: i32,
+}
 
-    fn verify_in(env: &[f32], x: &f32) -> Result<(), Self::Error> {
-        if env.is_empty() {
-            return Err(NormErr::EnvEmpty);
-        }
-        if !x.is_finite() {
-            return Err(NormErr::ValueNonFinite);
-        }
-        if !env.iter().all(|v| v.is_finite()) {
-            return Err(NormErr::EnvNonFinite);
-        }
-
-        let sum = env.iter().copied().sum::<f32>();
-        if (sum - 1.0).abs() > 1e-6 {
-            return Err(NormErr::EnvSumNotOne { sum });
-        }
-
-        env.iter()
-            .any(|v| v == x)
-            .then_some(())
-            .ok_or(NormErr::NotMember { x: *x })
+impl InRange {
+    fn prove_in(range: &Range, value: &i32) -> Result<Self, RangeErr> {
+        (range.start <= *value && *value < range.end_excl)
+            .then_some(Self)
+            .ok_or(RangeErr::OutOfRange { value: *value })
     }
 }
 
-fn main() {
-    let env = vec![0.2, 0.3, 0.5];
-    let x = WitnessedInRef::<[f32], f32, Normalized>::try_new_in(env.as_slice(), 0.3).unwrap();
+fn main() -> Result<(), RangeErr> {
+    let range = Range {
+        start: 10,
+        end_excl: 20,
+    };
 
-    assert_eq!(*x, 0.3);
+    let x = 15.witness().by(|value| InRange::prove_in(&range, value))?;
+
+    assert_eq!(*x, 15);
+
+    Ok(())
 }
 ```
 
-### Owned contextual witness
-
-Use `WitnessedInOwned` when validation depends on an environment type such as `Arc<[f32]>`, but the witnessed value should remain a transparent wrapper over `T` and should not carry a borrow lifetime.
+The resulting type records only:
 
 ```rust
-use std::sync::Arc;
-use witnessed::contextual::{WitnessIn, WitnessedInOwned};
+Witnessed<i32, InRange>
+```
 
-struct Normalized;
+It does not store `range`, and it does not encode the lifetime of `range`.
 
-#[derive(Debug, PartialEq)]
-enum NormErr {
-    EnvEmpty,
-    EnvNonFinite,
-    EnvSumNotOne { sum: f32 },
-    ValueNonFinite,
-    NotMember { x: f32 },
-}
+This crate models a witnessed value as:
 
-impl WitnessIn<f32, Arc<[f32]>> for Normalized {
-    type Error = NormErr;
+> a value that crossed a witness-producing boundary
 
-    fn verify_in(env: &Arc<[f32]>, x: &f32) -> Result<(), Self::Error> {
-        let env = env.as_ref();
+not as:
 
-        if env.is_empty() {
-            return Err(NormErr::EnvEmpty);
-        }
-        if !x.is_finite() {
-            return Err(NormErr::ValueNonFinite);
-        }
-        if !env.iter().all(|v| v.is_finite()) {
-            return Err(NormErr::EnvNonFinite);
-        }
+> a value that remains dynamically tied to an environment after construction
 
-        let sum = env.iter().copied().sum::<f32>();
-        if (sum - 1.0).abs() > 1e-6 {
-            return Err(NormErr::EnvSumNotOne { sum });
-        }
+---
 
-        env.iter()
-            .any(|v| v == x)
-            .then_some(())
-            .ok_or(NormErr::NotMember { x: *x })
-    }
-}
+## Unsafe witnessing
 
-fn main() {
-    let env: Arc<[f32]> = vec![0.2, 0.3, 0.5].into();
-    let x = WitnessedInOwned::<Arc<[f32]>, f32, Normalized>::try_new_in(&env, 0.3).unwrap();
+Sometimes a value is derived from already-witnessed inputs, and rechecking would be redundant.
 
-    assert_eq!(*x, 0.3);
+For those cases, use the explicit unsafe boundary:
+
+```rust
+unsafe {
+    value.witness().by_unchecked::<W>()
 }
 ```
 
----
-
-## Which contextual wrapper should I use?
-
-- Use `WitnessedInRef` when the proof must be tied to a borrowed environment lifetime.
-- Use `WitnessedInOwned` when the environment is represented by an owned handle type such as `Arc<_>`, and you do not want to thread a borrow lifetime through your APIs.
-
-In both cases, the environment is used only during validation and is **not stored at runtime**.
-
----
-
-## Warrant
-
-Sometimes a value is derived from already-witnessed inputs under a trusted closure rule.
-
-For those cases, the crate provides:
-
-- `Warrant<T, W>`
-- `WarrantIn<T, Env, W>`
-
-Behavior:
-
-- in **debug** builds, validation still runs
-- in **release** builds, construction can skip re-checking
-
-This is useful when a known closure property preserves the invariant and you want zero overhead in optimized builds.
+Example:
 
 ```rust
-use witnessed::{Warrant, Witness, Witnessed};
+use witnessed::{WitnessExt, Witnessed};
 
 struct ZeroOne;
-#[derive(Debug, PartialEq)]
-enum ZErr { OutOfRange(f32) }
 
-impl Witness<f32> for ZeroOne {
-    type Error = ZErr;
+fn mul01(
+    a: Witnessed<f32, ZeroOne>,
+    b: Witnessed<f32, ZeroOne>,
+) -> Witnessed<f32, ZeroOne> {
+    let out = *a * *b;
 
-    fn verify(x: &f32) -> Result<(), Self::Error> {
-        (0.0 <= *x && *x <= 1.0).then_some(()).ok_or(ZErr::OutOfRange(*x))
-    }
-}
-
-struct Mul01;
-unsafe impl Warrant<f32, ZeroOne> for Mul01 {}
-
-fn mul01(a: Witnessed<f32, ZeroOne>, b: Witnessed<f32, ZeroOne>) -> Witnessed<f32, ZeroOne> {
-    <Mul01 as Warrant<f32, ZeroOne>>::warrant(|| *a * *b)
+    // Safety:
+    // If a and b are both in [0, 1], then a * b is also in [0, 1].
+    unsafe { out.witness().by_unchecked::<ZeroOne>() }
 }
 ```
+
+`by_unchecked` does not run a proof function.
+
+The caller must guarantee that the value satisfies the fact represented by `W`.
+
+---
+
+## Dropping the witness
+
+Use `into_inner()` when intentionally returning to the raw value:
+
+```rust
+let raw = witnessed.into_inner();
+```
+
+After extraction, the witness guarantee is no longer represented in the type system.
 
 ---
 
 ## Representation
 
-- `Witnessed<T, W>` is `repr(transparent)` over `T`
-- `WitnessedInRef<'a, Env, T, W>` is `repr(transparent)` over `T`
-- `WitnessedInOwned<Env, T, W>` is `repr(transparent)` over `T`
+`Witnessed<T, W>` is `repr(transparent)` over `T`.
 
-Witness types and contextual environment types participate only in the type system; they are not stored at runtime.
+The witness token type `W` participates only in the type system. It is not stored at runtime.
+
+This means:
+
+* no runtime witness field
+* no environment field
+* no extra pointer
+* no additional size overhead
+* auto-traits are driven by `T`, not by `W`
 
 ---
 
@@ -251,22 +243,8 @@ Witness types and contextual environment types participate only in the type syst
 This crate supports `#![no_std]`.
 
 The core API depends only on `core`.
+
 Tests use `std` under `#[cfg(test)]`.
-
----
-
-## Why generic `Witness<T>` instead of `type Target`?
-
-Because a single witness type can naturally apply to multiple carriers:
-
-```rust
-struct NonEmpty;
-
-impl Witness<String> for NonEmpty { /* ... */ }
-impl<T> Witness<Vec<T>> for NonEmpty { /* ... */ }
-```
-
-Using a generic parameter for `T` preserves that flexibility.
 
 ---
 
@@ -274,7 +252,34 @@ Using a generic parameter for `T` preserves that flexibility.
 
 Typical usage:
 
-- validate at boundaries
-- require witnessed values in internal APIs
-- use `into_inner()` only when intentionally dropping the guarantee
-- use `Warrant` / `WarrantIn` for trusted derivations
+1. Accept raw values at boundaries.
+2. Produce witness tokens with `value.witness().by(...)`.
+3. Require `Witnessed<T, W>` in internal APIs.
+4. Use `into_inner()` only when intentionally dropping the type-level fact.
+5. Use `unsafe { value.witness().by_unchecked::<W>() }` only for audited trusted derivations.
+
+---
+
+## Design note
+
+`W` is a witness token type, not a validator trait.
+
+This keeps the API small:
+
+```rust
+value.witness().by(W::prove)?
+value.witness().by(|value| W::prove_with(&env, value))?
+unsafe { value.witness().by_unchecked::<W>() }
+```
+
+The crate does not prescribe how witness tokens are produced.
+
+They may come from:
+
+* associated functions
+* free functions
+* closures
+* context-capturing closures
+* audited unsafe derivation rules
+
+The only thing `Witnessed<T, W>` records is that construction crossed a boundary that established `W` for `T`.
