@@ -1,6 +1,7 @@
 # witnessed
 
 [![crates.io](https://img.shields.io/crates/v/witnessed.svg)](https://crates.io/crates/witnessed)
+[![Coverage](https://codecov.io/gh/jcfangc/witnessed/branch/main/graph/badge.svg)](https://codecov.io/gh/jcfangc/witnessed)
 
 A small Rust pattern for carrying boundary-established facts through the type system.
 
